@@ -26,8 +26,8 @@ st.set_page_config(
 # ---------------------------------------------------------------------------
 # Connection
 # ---------------------------------------------------------------------------
-conn = st.connection("snowflake")
-session = conn.session()
+from snowflake.snowpark.context import get_active_session
+session = get_active_session()
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -58,7 +58,13 @@ def run_sql(sql: str, show_code: bool = True) -> pd.DataFrame:
     if show_code:
         st.code(sql.strip(), language="sql")
     try:
-        df = conn.query(sql)
+        result = session.sql(sql)
+        rows = result.collect()
+        if not rows:
+            return pd.DataFrame()
+        col_names = list(rows[0].as_dict().keys())
+        data = [list(row.as_dict().values()) for row in rows]
+        df = pd.DataFrame(data, columns=col_names)
         return df
     except Exception as e:
         st.error(f"Query error: {e}")
@@ -332,18 +338,26 @@ mv = registry.log_model(
     st.markdown("---")
     st.subheader("Model Versions & Metrics")
     if st.button("Show Model Version Details", key="model_versions"):
-        sql = """SELECT
-    MODEL_NAME, VERSION_NAME, COMMENT,
-    PARSE_JSON(METADATA):metrics:roc_auc::FLOAT AS ROC_AUC,
-    PARSE_JSON(METADATA):metrics:average_precision::FLOAT AS AVG_PRECISION,
-    PARSE_JSON(METADATA):metrics:n_features::INT AS N_FEATURES,
-    PARSE_JSON(METADATA):metrics:training_samples::INT AS TRAINING_SAMPLES,
-    PARSE_JSON(METADATA):metrics:test_samples::INT AS TEST_SAMPLES,
-    CREATED_ON
-FROM HEALTHCARE_ML.INFORMATION_SCHEMA.MODEL_VERSIONS
-WHERE MODEL_NAME = 'READMISSION_PREDICTOR'"""
+        sql = """SHOW VERSIONS IN MODEL HEALTHCARE_ML.MODEL_REGISTRY.READMISSION_PREDICTOR"""
         df = run_sql(sql)
-        show_result(df)
+        if not df.empty:
+            import json
+            display_df = df[["name", "comment", "metadata", "created_on"]].copy()
+            try:
+                metadata = json.loads(display_df["metadata"].iloc[0]) if display_df["metadata"].iloc[0] else {}
+                metrics = metadata.get("metrics", {})
+                display_df["ROC_AUC"] = metrics.get("roc_auc")
+                display_df["AVG_PRECISION"] = metrics.get("average_precision")
+                display_df["N_FEATURES"] = metrics.get("n_features")
+                display_df["TRAINING_SAMPLES"] = metrics.get("training_samples")
+                display_df["TEST_SAMPLES"] = metrics.get("test_samples")
+                display_df = display_df.drop(columns=["metadata"])
+            except:
+                pass
+            display_df.columns = [c.upper() for c in display_df.columns]
+            show_result(display_df)
+        else:
+            show_result(df)
 
     st.markdown("---")
     st.subheader("Model Functions")
@@ -420,11 +434,11 @@ results_df.write.save_as_table(
     if st.button("Prediction Summary Statistics", key="batch_stats"):
         sql = f"""SELECT
     COUNT(*) AS TOTAL_SCORED,
-    ROUND(AVG("predict_proba_1"), 4) AS AVG_READMISSION_PROB,
-    ROUND(MIN("predict_proba_1"), 4) AS MIN_PROB,
-    ROUND(MAX("predict_proba_1"), 4) AS MAX_PROB,
-    SUM(CASE WHEN "predict_proba_1" > 0.5 THEN 1 ELSE 0 END) AS HIGH_RISK_COUNT,
-    ROUND(SUM(CASE WHEN "predict_proba_1" > 0.5 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1)
+    ROUND(AVG(PROB_READMITTED), 4) AS AVG_READMISSION_PROB,
+    ROUND(MIN(PROB_READMITTED), 4) AS MIN_PROB,
+    ROUND(MAX(PROB_READMITTED), 4) AS MAX_PROB,
+    SUM(CASE WHEN PROB_READMITTED > 0.5 THEN 1 ELSE 0 END) AS HIGH_RISK_COUNT,
+    ROUND(SUM(CASE WHEN PROB_READMITTED > 0.5 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1)
         AS HIGH_RISK_PCT
 FROM {DB}.INFERENCE.BATCH_PREDICTIONS"""
         df = run_sql(sql)
@@ -435,12 +449,12 @@ FROM {DB}.INFERENCE.BATCH_PREDICTIONS"""
     if st.button("Show Risk Tier Breakdown", key="risk_tiers"):
         sql = f"""SELECT
     CASE
-        WHEN "predict_proba_1" >= 0.7 THEN 'HIGH (>=0.7)'
-        WHEN "predict_proba_1" >= 0.4 THEN 'MEDIUM (0.4-0.7)'
+        WHEN PROB_READMITTED >= 0.7 THEN 'HIGH (>=0.7)'
+        WHEN PROB_READMITTED >= 0.4 THEN 'MEDIUM (0.4-0.7)'
         ELSE 'LOW (<0.4)'
     END AS RISK_TIER,
     COUNT(*) AS PATIENT_COUNT,
-    ROUND(AVG("predict_proba_1"), 4) AS AVG_PROBABILITY
+    ROUND(AVG(PROB_READMITTED), 4) AS AVG_PROBABILITY
 FROM {DB}.INFERENCE.BATCH_PREDICTIONS
 GROUP BY RISK_TIER
 ORDER BY AVG_PROBABILITY DESC"""
@@ -489,7 +503,7 @@ prediction = mv.run(features.select(FEATURE_COLUMNS),
 FROM {FEATURE_TABLE}
 ORDER BY PATIENT_ID
 LIMIT 100"""
-    patient_list = conn.query(patient_sql)["PATIENT_ID"].tolist()
+    patient_list = session.sql(patient_sql).to_pandas()["PATIENT_ID"].tolist()
 
     selected_patient = st.selectbox("Select Patient ID", patient_list[:50])
 
@@ -502,20 +516,33 @@ LIMIT 1"""
         df = run_sql(sql)
         show_result(df)
 
-    if st.button("Show Patient's Batch Prediction", key="rt_predict"):
-        sql = f"""SELECT bp.*
-FROM {DB}.INFERENCE.BATCH_PREDICTIONS bp
-INNER JOIN {FEATURE_TABLE} ft
-    ON bp."predict_proba_INDEX" = ft.ADMISSION_ID
-WHERE ft.PATIENT_ID = '{selected_patient}'
-LIMIT 5"""
-        df = run_sql(sql)
-        if df.empty:
-            st.info("No batch prediction found for this patient. Showing a sample of predictions instead.")
-            df2 = run_sql(f"SELECT * FROM {DB}.INFERENCE.BATCH_PREDICTIONS LIMIT 5", show_code=False)
-            show_result(df2)
-        else:
-            show_result(df)
+    if st.button("Score Patient Now (Real-Time)", key="rt_predict"):
+        with st.spinner("Running real-time inference..."):
+            sql = f"""
+WITH patient_features AS (
+    SELECT * FROM {FEATURE_TABLE}
+    WHERE PATIENT_ID = '{selected_patient}'
+    ORDER BY EVENT_TIMESTAMP DESC
+    LIMIT 1
+)
+SELECT 
+    PATIENT_ID,
+    ADMISSION_ID,
+    READMITTED_30D AS ACTUAL_OUTCOME,
+    {DB}.MODEL_REGISTRY.READMISSION_PREDICTOR!PREDICT_PROBA(
+        AGE, GENDER_ENC, INSURANCE_ENC, HAS_PCP_FLAG,
+        LENGTH_OF_STAY, NUM_PROCEDURES, NUM_DIAGNOSES, DIAGNOSIS_RISK_SCORE,
+        DISPOSITION_RISK_SCORE, ED_ADMISSION, HEART_RATE, SYSTOLIC_BP, DIASTOLIC_BP,
+        TEMPERATURE, RESPIRATORY_RATE, O2_SATURATION, BLOOD_GLUCOSE, CREATININE,
+        HEMOGLOBIN, WBC_COUNT, SODIUM, POTASSIUM, BNP, ABNORMAL_HR, ABNORMAL_BP,
+        LOW_O2, HIGH_CREATININE, LOW_HEMOGLOBIN, HIGH_BNP, ABNORMAL_GLUCOSE,
+        PRIOR_ADMISSIONS_6M, PRIOR_READMISSIONS, AVG_PRIOR_LOS
+    ) AS PREDICTION_RESULT
+FROM patient_features"""
+            df = run_sql(sql)
+            if not df.empty:
+                show_result(df)
+                st.markdown("**Interpretation:** The `PREDICTION_RESULT` column contains the probability scores from the model.")
 
 # =========================================================================
 # STEP 6: GIT INTEGRATION
