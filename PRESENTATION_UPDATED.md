@@ -41,12 +41,13 @@ From Notebooks to Production Pipelines — A Hands-On Walkthrough
 |---|-------|-----------------|
 | 1 | Architecture Overview | Understand the end-to-end ML lifecycle on Snowflake |
 | 2 | Project Structure | See how notebooks evolve into production code |
-| 3 | Snowflake ML Platform | Feature Store, Model Registry, SPCS, Online Serving |
-| 4 | Git Integration Setup | Connect your GitHub/GitLab repo to Snowflake |
-| 5 | Team Collaboration | Pull, branch, develop, and push from Snowflake |
-| 6 | Model Promotion | Promote notebook code to production `.py` modules |
-| 7 | Scheduled Execution | Run pipelines from Git via Snowflake Tasks |
-| 8 | Hands-On Implementation | Build it yourself in your environment |
+| 3 | Dev vs Prod Notebooks | Consolidated demo (`00`) vs 5 production notebooks (`01`-`05`) |
+| 4 | Snowflake ML Platform | Feature Store, Model Registry, SPCS, Online Serving |
+| 5 | Git Integration Setup | Connect your GitHub/GitLab repo to Snowflake |
+| 6 | Team Collaboration | Pull, branch, develop, and push from Snowflake |
+| 7 | Model Promotion | Promote notebook code to production `.py` modules |
+| 8 | Scheduled Execution | Run pipelines from Git via Snowflake Tasks |
+| 9 | Hands-On Implementation | Build it yourself in your environment |
 
 ---
 
@@ -245,6 +246,192 @@ Interactive dashboard for exploring predictions, risk scores, and model performa
 
 </div>
 </div>
+
+---
+
+# Dev vs Prod — Two Notebook Approaches
+
+### One Codebase, Two Ways to Run
+
+<div class="columns">
+<div class="col">
+
+### DEV / DEMO Mode
+**`00_demo_walkthrough.ipynb`** (single notebook)
+
+- **Purpose**: End-to-end walkthrough for demos, workshops, and onboarding
+- **35 cells**, 8 sections covering the full ML lifecycle
+- Runs in Snowflake Notebooks (`get_active_session()`)
+- Self-contained: generates data, builds features, trains, registers, scores
+- Idempotent — safe to re-run any cell
+
+**When to use**: Demos, learning, workshops, rapid prototyping
+
+</div>
+<div class="col">
+
+### PROD / Hands-On Mode
+**`01` through `05` notebooks** (5 focused notebooks)
+
+- **Purpose**: Step-by-step execution for production implementation
+- Each notebook covers one pipeline stage
+- Run sequentially — each builds on the previous
+- Maps 1:1 to `src/*.py` production modules
+- Designed for teams building their own environment
+
+**When to use**: Production setup, team onboarding, hands-on labs
+
+</div>
+</div>
+
+> Both approaches use the **same Snowflake objects** and the **same `src/` modules**. The difference is packaging.
+
+---
+
+# Production Notebook Structure (01-05)
+
+### Five Notebooks — One Per Pipeline Stage
+
+| # | Notebook | Purpose | Snowflake Objects Created | Maps to `src/` |
+|---|----------|---------|--------------------------|-----------------|
+| 01 | `01_local_training.ipynb` | Generate data, engineer features, train model, save artifacts | _(local only — no Snowflake objects)_ | `train.py`, `feature_engineering.py` |
+| 02 | `02_snowflake_setup.ipynb` | Upload data, create Feature Store, register Entity + Feature View, enable Online Store | `PATIENTS`, `ADMISSIONS`, `CLINICAL_MEASUREMENTS`, `PATIENT` entity, `PATIENT_CLINICAL_FEATURES$V1` DT, Online Store | `feature_engineering.py`, `config.py` |
+| 03 | `03_model_registry.ipynb` | Load local model, register in Snowflake Model Registry, verify inference | `READMISSION_PREDICTOR` V1 model | `register_model.py` |
+| 04 | `04_batch_inference.ipynb` | Score all patients via SPCS `run_batch()`, save predictions | `BATCH_OUTPUT` stage, `BATCH_PREDICTIONS` table | `batch_inference.py` |
+| 05 | `05_realtime_inference.ipynb` | Real-time single-patient inference via Online Feature Store | _(uses existing objects)_ | `realtime_inference.py` |
+
+### Execution Order
+
+```
+01 Local Training ──> 02 Snowflake Setup ──> 03 Model Registry ──> 04 Batch Inference ──> 05 Real-Time Inference
+   (local)              (Snowflake)           (Snowflake)           (SPCS)                  (Online Store)
+```
+
+---
+
+# How the Demo Notebook Maps to Production Notebooks
+
+### `00_demo_walkthrough.ipynb` Section-to-Notebook Mapping
+
+```
+  00_demo_walkthrough.ipynb                     Production Notebooks (01-05)
+  ─────────────────────────                     ───────────────────────────
+
+  Section 1: Setup & Infrastructure  ─────────> 02_snowflake_setup.ipynb (cells 1-7)
+  Section 2: Data Ingestion          ─────────> 01_local_training.ipynb (cells 3-5)
+                                                 + 02_snowflake_setup.ipynb (cells 5-9)
+  Section 3: Feature Store           ─────────> 02_snowflake_setup.ipynb (cells 11-20)
+  Section 4: Model Training          ─────────> 01_local_training.ipynb (cells 7-18)
+  Section 5: Model Registry          ─────────> 03_model_registry.ipynb (cells 5-11)
+  Section 6: Batch Inference         ─────────> 04_batch_inference.ipynb (cells 5-17)
+  Section 7: Real-Time Inference     ─────────> 05_realtime_inference.ipynb (cells 5-16)
+  Section 8: Git + Scheduling        ─────────> (SQL scripts in production/tasks/)
+```
+
+### Key Differences
+
+| Aspect | `00_demo_walkthrough` | `01`-`05` Production Notebooks |
+|--------|----------------------|-------------------------------|
+| **Session** | `get_active_session()` (Snowflake Notebooks) | `Session.builder` with `connection_name: DEMO` |
+| **Data** | Generates synthetic data inline | Notebook 01 generates + saves to `artifacts/`, Notebook 02 uploads |
+| **Artifacts** | In-memory only (no filesystem) | Saved to `./artifacts/` directory |
+| **Training** | Inline in cells | Notebook 01 trains locally, saves `.joblib` |
+| **Registration** | Trains + registers in same flow | Notebook 03 loads from `artifacts/`, registers |
+
+---
+
+# Dev-to-Prod Promotion Flow
+
+### Two Paths From Experimentation to Production
+
+```
+  ┌────────────────────────────────────────────────────────────────────────────────────┐
+  │                                                                                    │
+  │   PATH A: Demo-First (Top-Down)              PATH B: Build-First (Bottom-Up)       │
+  │   ──────────────────────────                  ────────────────────────────────       │
+  │                                                                                    │
+  │   00_demo_walkthrough.ipynb                   01_local_training.ipynb               │
+  │       (run full demo)                             (train + save artifacts)          │
+  │            │                                  02_snowflake_setup.ipynb              │
+  │            │  Extract logic                       (upload + Feature Store)          │
+  │            v                                  03_model_registry.ipynb               │
+  │   src/*.py modules                                (register model)                 │
+  │       (reusable code)                         04_batch_inference.ipynb              │
+  │            │                                      (batch scoring)                   │
+  │            │  Wire entry points               05_realtime_inference.ipynb           │
+  │            v                                      (real-time inference)             │
+  │   production/run_*.py                                    │                          │
+  │       (EXECUTE IMMEDIATE FROM)                           │  Already modular         │
+  │            │                                             v                          │
+  │            │  git push + PR                   src/*.py modules                      │
+  │            v                                      (same destination)                │
+  │   ┌──────────────┐                                       │                          │
+  │   │ main branch  │<──────────────────────────────────────┘                          │
+  │   └──────┬───────┘                                                                 │
+  │          │                                                                          │
+  │          v                                                                          │
+  │   Snowflake Tasks (GIT_FETCH --> BATCH_SCORING)                                    │
+  │   EXECUTE IMMEDIATE FROM @.../production/run_*.py                                  │
+  │                                                                                    │
+  └────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+> **Both paths converge** on the same `src/` modules, `production/` entry points, and Snowflake Tasks.
+
+---
+
+# Production Project Structure — Complete Layout
+
+```
+healthcare-readmission-ml/
+├── notebooks/
+│   ├── 00_demo_walkthrough.ipynb      <-- Demo: single consolidated notebook
+│   ├── 01_local_training.ipynb        <-- Prod: generate data + train locally
+│   ├── 02_snowflake_setup.ipynb       <-- Prod: upload data + Feature Store
+│   ├── 03_model_registry.ipynb        <-- Prod: register model in Snowflake
+│   ├── 04_batch_inference.ipynb       <-- Prod: batch scoring via SPCS
+│   └── 05_realtime_inference.ipynb    <-- Prod: real-time inference
+├── src/                               <-- Production Python modules
+│   ├── config.py                           Session factory, env config, constants
+│   ├── feature_engineering.py              Feature View SQL + pandas engineer_features()
+│   ├── train.py                            train_model() — GBC training + evaluation
+│   ├── register_model.py                   register_model() — log to Model Registry
+│   ├── batch_inference.py                  run_batch_inference() — SPCS batch scoring
+│   └── realtime_inference.py               predict_readmission_risk() — single-patient
+├── production/                        <-- Snowflake EXECUTE IMMEDIATE entry points
+│   ├── run_training.py                     Calls src/train.py + src/register_model.py
+│   └── run_batch_inference.py              Calls src/batch_inference.py
+├── streamlit_app/                     <-- Interactive dashboard
+│   ├── streamlit_app.py
+│   ├── snowflake.yml
+│   └── pyproject.toml
+├── artifacts/                         <-- Local training outputs (not in Snowflake)
+│   ├── readmission_model.joblib
+│   ├── model_metadata.json
+│   └── *.csv
+└── requirements.txt
+```
+
+---
+
+# When to Use Which Approach
+
+| Scenario | Use `00_demo_walkthrough` | Use `01`-`05` Notebooks |
+|----------|:------------------------:|:----------------------:|
+| **Live demo to stakeholders** | Yes | -- |
+| **Workshop / conference talk** | Yes | -- |
+| **New team member onboarding** | -- | Yes |
+| **Building a new environment from scratch** | -- | Yes |
+| **Understanding the full pipeline quickly** | Yes | -- |
+| **Debugging a specific pipeline stage** | -- | Yes (run just that notebook) |
+| **Production implementation** | -- | Yes |
+| **Quick proof-of-concept** | Yes | -- |
+
+### Recommendation
+
+> **Start with `00_demo_walkthrough.ipynb`** to understand the end-to-end flow.
+> Then **use `01`-`05` notebooks** to build your production environment step by step.
+> Finally, **promote to `src/` + `production/`** for automated scheduled execution.
 
 ---
 
@@ -1061,6 +1248,8 @@ Tag. Push. Fetch. Done.
 | Resource | Location |
 |----------|----------|
 | This repo | `github.com/sfc-gh-moahmed/healthcare-readmission-ml` |
+| Demo notebook | `notebooks/00_demo_walkthrough.ipynb` |
+| Production notebooks | `notebooks/01_local_training.ipynb` through `05_realtime_inference.ipynb` |
 | Git setup SQL | `scripts/setup_snowflake_git.sql` |
 | Task setup SQL | `production/tasks/setup_tasks.sql` |
 | Promotion script | `scripts/promote_to_prod.sh` |
