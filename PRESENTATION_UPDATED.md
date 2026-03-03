@@ -114,12 +114,10 @@ From Notebooks to Production Pipelines — A Hands-On Walkthrough
 
 ```
 healthcare-readmission-ml/
-├── notebooks/          <-- Experimentation
-│   ├── 01_local_training.ipynb
-│   ├── 02_snowflake_setup.ipynb
-│   ├── 03_model_registry.ipynb
-│   ├── 04_batch_inference.ipynb
-│   └── 05_realtime_inference.ipynb
+├── notebooks/
+│   └── 00_demo_walkthrough.ipynb
+│       (single consolidated notebook,
+│        8 sections, 35 cells)
 ├── src/                <-- Production modules
 │   ├── config.py
 │   ├── feature_engineering.py
@@ -129,13 +127,12 @@ healthcare-readmission-ml/
 │   └── realtime_inference.py
 ├── production/         <-- Snowflake entry points
 │   ├── run_training.py
-│   ├── run_batch_inference.py
-│   └── tasks/setup_tasks.sql
-├── scripts/            <-- Git + promotion
-│   ├── setup_snowflake_git.sql
-│   └── promote_to_prod.sh
-└── artifacts/
-    └── model_metadata.json
+│   └── run_batch_inference.py
+├── streamlit_app/
+│   ├── streamlit_app.py
+│   ├── snowflake.yml
+│   └── pyproject.toml
+└── requirements.txt
 ```
 
 </div>
@@ -145,17 +142,106 @@ healthcare-readmission-ml/
 
 | Layer | Purpose | Who Uses It |
 |-------|---------|-------------|
-| `notebooks/` | Experimentation, EDA, prototyping | Data Scientists |
+| `notebooks/` | Full walkthrough demo, runs in Snowflake Notebooks | Data Scientists |
 | `src/` | Reusable, tested Python modules | DS + ML Engineers |
-| `production/` | Entry points for Snowflake execution | Snowflake Tasks / Ops |
+| `production/` | Entry points for `EXECUTE IMMEDIATE FROM` | Snowflake Tasks / Ops |
 
 ### Key Principle
 
-> Notebooks are for **discovery**.
+> The notebook is for **learning and demo**.
 > `src/` is for **reusable logic**.
 > `production/` is for **execution in Snowflake**.
 
 Code flows **one direction**: notebooks --> src --> production.
+
+</div>
+</div>
+
+---
+
+# Notebook to .py File Mapping
+
+### `00_demo_walkthrough.ipynb` — 8 Sections, 35 Cells
+
+| Notebook Section | Cells | Corresponding `.py` File | How to Run |
+|-----------------|-------|-------------------------|------------|
+| **1. Setup & Infrastructure** | 2-3 | `src/config.py` | Session + DDL — config provides `get_session()`, `CONFIG`, `FEATURE_COLUMNS` |
+| **2. Data Ingestion** | 4-6 | _(inline in notebook)_ | Generates synthetic data or loads existing tables |
+| **3. Feature Store** | 8-13 | `src/feature_engineering.py` | SQL template in `FEATURE_VIEW_SQL`, pandas version in `engineer_features()` |
+| **4. Model Training** | 15-18 | `src/train.py` | `train_model(df)` — returns trained model + metrics |
+| **5. Model Registry** | 20-22 | `src/register_model.py` | `register_model()` — logs model to Snowflake Registry |
+| **6. Batch Inference** | 24-26 | `src/batch_inference.py` | `run_batch_inference()` — scores all patients via SPCS |
+| **7. Real-Time Inference** | 28-29 | `src/realtime_inference.py` | `predict_readmission_risk(patient_id)` — single-patient scoring |
+| **8. Git + Scheduling** | 31-34 | `production/run_*.py` | Entry points for `EXECUTE IMMEDIATE FROM` |
+
+---
+
+# How to Run — Three Modes
+
+<div class="columns">
+<div class="col">
+
+### 1. Snowflake Notebooks (Demo)
+
+Run `00_demo_walkthrough.ipynb` cell by cell in Snowflake Notebooks.
+
+```
+Snowflake UI --> Notebooks --> Import
+  from @HEALTHCARE_ML.PUBLIC.NOTEBOOKS
+```
+
+- Uses `get_active_session()`
+- All 8 sections run end-to-end
+- Idempotent — safe to re-run
+
+### 2. Local Development (CLI)
+
+```bash
+pip install -r requirements.txt
+
+# Train locally
+python -m src.train \
+  --data-csv artifacts/training_data.csv
+
+# Register model
+python -m src.register_model \
+  --version V2
+```
+
+- Uses `config.py` with `connection_name: DEMO`
+- Set `HEALTHCARE_ML_ENV=PROD` for production
+
+</div>
+<div class="col">
+
+### 3. Snowflake Scheduled (Production)
+
+```sql
+-- Fetch latest code from GitHub
+ALTER GIT REPOSITORY
+  HEALTHCARE_ML.GIT_INTEGRATION
+    .HEALTHCARE_ML_REPO FETCH;
+
+-- Run batch inference from Git
+EXECUTE IMMEDIATE FROM
+  @HEALTHCARE_ML.GIT_INTEGRATION
+    .HEALTHCARE_ML_REPO
+  /branches/main/production
+  /run_batch_inference.py;
+```
+
+- `production/run_training.py` calls `src/train.py` + `src/register_model.py`
+- `production/run_batch_inference.py` calls `src/batch_inference.py`
+- Automate via Snowflake Tasks (hourly fetch + score)
+
+### Streamlit App
+
+```
+HEALTHCARE_ML.PUBLIC
+  .HEALTHCARE_ML_PIPELINE_DEMO
+```
+
+Interactive dashboard for exploring predictions, risk scores, and model performance.
 
 </div>
 </div>
@@ -539,18 +625,18 @@ Moving from notebooks to production, and automating execution
 
   ┌─────────────────┐          ┌─────────────────┐           ┌──────────────────────┐
   │                  │          │                  │           │                       │
-  │  NOTEBOOKS       │  Extract │  src/ MODULES    │  promote  │  SNOWFLAKE EXECUTION  │
+  │  NOTEBOOK        │  Extract │  src/ MODULES    │  promote  │  SNOWFLAKE EXECUTION  │
   │                  │ ───────> │                  │ ────────> │                       │
-  │  01_local_       │          │  config.py       │           │  EXECUTE IMMEDIATE    │
-  │    training.ipynb│          │  train.py        │           │    FROM @git_repo/    │
-  │  02_snowflake_   │          │  register_model  │           │    .../run_training.py│
-  │    setup.ipynb   │          │    .py           │           │                       │
-  │  03_model_       │          │  batch_inference │           │  Scheduled via TASK   │
-  │    registry.ipynb│          │    .py           │           │  - GIT_FETCH_TASK     │
-  │  04_batch_       │          │  realtime_       │           │  - BATCH_SCORING_TASK │
-  │    inference     │          │    inference.py  │           │                       │
-  │  05_realtime_    │          │  feature_        │           │  Tagged releases:     │
-  │    inference     │          │    engineering   │           │    model-V1           │
+  │  00_demo_        │          │  config.py       │           │  EXECUTE IMMEDIATE    │
+  │  walkthrough     │          │  train.py        │           │    FROM @git_repo/    │
+  │    .ipynb        │          │  register_model  │           │    .../run_training.py│
+  │                  │          │    .py           │           │                       │
+  │  Sections 1-8:   │          │  batch_inference │           │  Scheduled via TASK   │
+  │  - Feature Store │          │    .py           │           │  - GIT_FETCH_TASK     │
+  │  - Training      │          │  realtime_       │           │  - BATCH_SCORING_TASK │
+  │  - Registry      │          │    inference.py  │           │                       │
+  │  - Inference     │          │  feature_        │           │  Tagged releases:     │
+  │  - Git Setup     │          │    engineering   │           │    model-V1           │
   │                  │          │    .py           │           │    model-V2           │
   └─────────────────┘          └─────────────────┘           └──────────────────────┘
                                         │
@@ -569,64 +655,65 @@ Moving from notebooks to production, and automating execution
 <div class="columns">
 <div class="col">
 
-### Notebook (experimentation)
+### Notebook (`00_demo_walkthrough.ipynb`)
 
 ```python
-# 03_model_registry.ipynb — cell 3
-session = Session.builder.config(
-    "connection_name", "DEMO"
-).create()
+# Cell 2 — Snowflake Notebooks
+from snowflake.snowpark.context \
+    import get_active_session
+
+session = get_active_session()
 session.sql("USE ROLE ACCOUNTADMIN").collect()
-session.sql("USE DATABASE HEALTHCARE_ML").collect()
-session.sql("USE SCHEMA MODEL_REGISTRY").collect()
-session.sql(
-    "USE WAREHOUSE HEALTHCARE_ML_WH"
-).collect()
 ```
 
-- Hardcoded connection, role, warehouse
-- Inline SQL mixed with Python
-- No reusability across notebooks
-- No environment switching
+```python
+# Cell 17 — Training (inline)
+model = GradientBoostingClassifier(
+    n_estimators=200, max_depth=4, ...
+)
+model.fit(X_train, y_train)
+y_proba = model.predict_proba(X_test)[:, 1]
+roc_auc = roc_auc_score(y_test, y_proba)
+```
+
+- Uses `get_active_session()` (Snowflake Notebooks)
+- Training logic is inline
+- Artifacts kept in-memory (no filesystem)
+- Idempotent — checks before creating objects
 
 </div>
 <div class="col">
 
-### Production Module (src/)
+### Production Module (`src/`)
 
 ```python
-# src/config.py
+# src/config.py — environment-aware
 ENV = os.environ.get(
     "HEALTHCARE_ML_ENV", "DEV"
 ).upper()
-
-_ENVIRONMENTS = {
-    "DEV": {
-        "connection_name": "DEMO",
-        "role": "ACCOUNTADMIN",
-        "warehouse": "HEALTHCARE_ML_WH",
-        ...
-    },
-    "PROD": {
-        "connection_name": "PROD_CONN",
-        "role": "ML_ENGINEER",
-        "warehouse": "HEALTHCARE_ML_PROD_WH",
-        ...
-    },
-}
 
 def get_session() -> Session:
     session = Session.builder.config(
         "connection_name",
         CONFIG["connection_name"]
     ).create()
-    ...
     return session
 ```
 
-- Environment-aware (DEV/PROD)
-- Single source of truth for settings
-- Importable by any script or notebook
+```python
+# src/train.py — reusable function
+def train_model(training_df, artifacts_dir):
+    X = training_df[FEATURE_COLUMNS]
+    model = GradientBoostingClassifier(...)
+    model.fit(X_train, y_train)
+    joblib.dump(model, model_path)
+    return {"model": model, "metrics": ...}
+```
+
+- Uses `connection_name` config (local/CLI)
+- Training is a callable function
+- Saves artifacts to disk
+- DEV/PROD environment switching
 
 </div>
 </div>
