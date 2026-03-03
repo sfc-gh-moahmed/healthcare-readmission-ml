@@ -70,10 +70,8 @@ def predict_readmission_risk(
     # Run inference
     available = [c for c in FEATURE_COLUMNS if c in features.columns]
     proba = mv.run(features[available], function_name="predict_proba")
-    # Column name varies by SDK version (e.g. predict_proba_1, PROB_READMITTED, output_feature_1)
-    prob_cols = [c for c in proba.columns if "1" in c or "READMIT" in c.upper()]
-    prob_col = prob_cols[-1] if prob_cols else proba.columns[-1]
-    readmission_prob = float(proba[prob_col].values[0])
+    # predict_proba returns [P(class_0), P(class_1)] — last column is readmission prob
+    readmission_prob = float(proba.iloc[0, -1])
 
     total_ms = round((time.time() - total_start) * 1000, 1)
 
